@@ -48,4 +48,9 @@ Base: `/api/v1`
 - `GET  /api/v1/auth/me`
 - `GET  /health`
 
-# famconn-backend
+## Family (Invitations)
+
+- POST `/api/v1/family/create` (auth required) -> returns first invite
+- POST `/api/v1/family/invite` (auth required, owner) -> create new 30-min single-use invite
+- POST `/api/v1/family/join` (auth required) -> join via invite code
+- GET `/api/v1/family/me` (auth required)

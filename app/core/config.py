@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_MINUTES: int = 15
     REFRESH_TOKEN_DAYS: int = 30
 
+    # Family invites
+    INVITE_TTL_MINUTES: int = 30
+
     # Rate limiting
     LOGIN_RATE_LIMIT_MAX: int = 5
     LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = 300

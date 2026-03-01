@@ -6,6 +6,7 @@ from starlette.responses import Response
 from app.core.config import settings
 from app.core.db import connect_to_mongo, close_mongo_connection
 from app.routes.auth import router as auth_router
+from app.routes import family
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -59,3 +60,4 @@ async def health():
 
 
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(family.router)
