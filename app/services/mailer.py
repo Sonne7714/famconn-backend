@@ -1,10 +1,13 @@
 from __future__ import annotations
+
 import os
 import smtplib
 from email.message import EmailMessage
 
+
 def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
+
 
 SMTP_HOST = _env("SMTP_HOST")
 SMTP_PORT = int(_env("SMTP_PORT", "587") or "587")
@@ -13,7 +16,9 @@ SMTP_PASSWORD = _env("SMTP_PASSWORD")
 SMTP_FROM = _env("SMTP_FROM", SMTP_USER)
 SMTP_FROM_NAME = _env("SMTP_FROM_NAME", "FamConn")
 
-def send_email(to: str, subject: str, text: str) -> None:
+
+def send_email(*, to: str, subject: str, text: str, html: str | None = None) -> None:
+    """Send email. If SMTP_HOST is unset, this is a no-op."""
     if not SMTP_HOST:
         return
 
@@ -21,7 +26,12 @@ def send_email(to: str, subject: str, text: str) -> None:
     msg["Subject"] = subject
     msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM}>"
     msg["To"] = to
-    msg.set_content(text)
+
+    if html:
+        msg.set_content(text)
+        msg.add_alternative(html, subtype="html")
+    else:
+        msg.set_content(text)
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
         s.starttls()
