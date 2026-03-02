@@ -10,6 +10,35 @@ from app.core.security import get_current_user
 
 router = APIRouter(prefix="/api/v1/family", tags=["Family"])
 
+async def _pick_unique_display_name(db, family_id, base_name: str) -> str:
+    base = (base_name or "").strip()
+    if not base:
+        base = "Mitglied"
+
+    existing = await db["family_members"].find(
+        {"family_id": family_id, "display_name": {"$regex": f"^{base}(?: [0-9]+)?$"}},
+        {"display_name": 1},
+    ).to_list(length=500)
+
+    if not existing:
+        return base
+
+    used_nums = set()
+    for m in existing:
+        dn = (m.get("display_name") or "").strip()
+        if dn == base:
+            used_nums.add(1)
+        elif dn.startswith(base + " "):
+            tail = dn[len(base) + 1 :]
+            if tail.isdigit():
+                used_nums.add(int(tail))
+
+    n = 2
+    while n in used_nums:
+        n += 1
+    return f"{base} {n}"
+
+
 
 async def _require_owner(db, user_id: str, family_id: ObjectId) -> None:
     owner = await db["family_members"].find_one(
