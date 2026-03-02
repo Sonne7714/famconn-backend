@@ -26,12 +26,14 @@ class UserService:
         return await db["users"].find_one({"_id": ObjectId(user_id)})
 
     @staticmethod
-    async def create_user(email: str, password: str, display_name: Optional[str]) -> dict:
+    async def create_user(email: str, password: str, display_name: Optional[str], first_name: Optional[str] = None, last_name: Optional[str] = None) -> dict:
         db = get_db()
         doc = {
             "email": email.strip().lower(),
             "password_hash": hash_password(password),
             "display_name": display_name,
+            "first_name": first_name or display_name,
+            "last_name": last_name,
             "disabled": False,
             "created_at": utcnow(),
             # refresh token rotation fields:

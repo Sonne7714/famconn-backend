@@ -10,6 +10,8 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     display_name: Optional[str] = Field(default=None, max_length=80)
+    first_name: Optional[str] = Field(default=None, max_length=60)
+    last_name: Optional[str] = Field(default=None, max_length=60)
 
     @field_validator("email")
     @classmethod
@@ -48,6 +50,8 @@ class UserPublic(BaseModel):
     id: str = Field(alias="_id")
     email: EmailStr
     display_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     disabled: bool = False
     created_at: datetime
 

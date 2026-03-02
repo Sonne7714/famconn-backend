@@ -18,6 +18,8 @@ def _public_user(user: dict) -> dict:
         "_id": str(user["_id"]),
         "email": user["email"],
         "display_name": user.get("display_name"),
+        "first_name": user.get("first_name") or user.get("display_name"),
+        "last_name": user.get("last_name"),
         "disabled": bool(user.get("disabled", False)),
         "created_at": user.get("created_at"),
     }
@@ -44,7 +46,7 @@ async def get_current_user(creds: HTTPAuthorizationCredentials | None = Depends(
 @router.post("/auth/register", response_model=UserPublic, status_code=201)
 async def register(data: UserCreate):
     try:
-        user = await UserService.create_user(data.email, data.password, data.display_name)
+        user = await UserService.create_user(data.email, data.password, data.display_name, first_name=data.first_name, last_name=data.last_name)
     except ValueError as e:
         if str(e) == "email_exists":
             raise HTTPException(status_code=409, detail="Email already registered")
