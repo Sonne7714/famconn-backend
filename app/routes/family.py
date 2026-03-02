@@ -10,6 +10,9 @@ from app.core.security import get_current_user
 
 router = APIRouter(prefix="/api/v1/family", tags=["Family"])
 
+
+# ---------------- DISPLAY NAME LOGIC ----------------
+
 async def _pick_unique_display_name(db, family_id, base_name: str) -> str:
     base = (base_name or "").strip()
     if not base:
@@ -39,6 +42,7 @@ async def _pick_unique_display_name(db, family_id, base_name: str) -> str:
     return f"{base} {n}"
 
 
+# ---------------- INTERNAL HELPERS ----------------
 
 async def _require_owner(db, user_id: str, family_id: ObjectId) -> None:
     owner = await db["family_members"].find_one(
@@ -50,7 +54,6 @@ async def _require_owner(db, user_id: str, family_id: ObjectId) -> None:
 
 
 async def _create_invitation(db, family_id: ObjectId, created_by: ObjectId) -> dict:
-    # Ensure unique code (retry a few times)
     code = None
     for _ in range(8):
         candidate = generate_invite_code()
@@ -62,6 +65,7 @@ async def _create_invitation(db, family_id: ObjectId, created_by: ObjectId) -> d
         raise HTTPException(status_code=500, detail="Could not generate invite code")
 
     expires_at = datetime.utcnow() + timedelta(minutes=settings.INVITE_TTL_MINUTES)
+
     doc = {
         "family_id": family_id,
         "code": code,
@@ -70,13 +74,15 @@ async def _create_invitation(db, family_id: ObjectId, created_by: ObjectId) -> d
         "created_by": created_by,
         "created_at": datetime.utcnow(),
     }
+
     await db["invitations"].insert_one(doc)
     return {"code": code, "expires_at": expires_at.isoformat() + "Z"}
 
 
+# ---------------- CREATE FAMILY ----------------
+
 @router.post("/create", status_code=status.HTTP_201_CREATED)
 async def create_family(payload: FamilyCreate, db=Depends(get_db), user=Depends(get_current_user)):
-    """Create a family and add creator as owner. Also returns a first invite (TTL-limited)."""
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Family name required")
@@ -90,149 +96,131 @@ async def create_family(payload: FamilyCreate, db=Depends(get_db), user=Depends(
     result = await db["families"].insert_one(family_doc)
     family_id = result.inserted_id
 
+    # Fetch user for display name
+    u = await db["users"].find_one({"_id": ObjectId(user["id"])}, {"first_name": 1, "email": 1})
+    base = (u or {}).get("first_name") or ((u or {}).get("email") or "").split("@")[0]
+    display_name = await _pick_unique_display_name(db, family_id, base)
+
     member_doc = {
         "family_id": family_id,
         "user_id": ObjectId(user["id"]),
         "role": "owner",
+        "display_name": display_name,
+        "sharing_enabled": True,
         "joined_at": datetime.utcnow(),
     }
+
     await db["family_members"].insert_one(member_doc)
 
-    invite = await _create_invitation(db, family_id=family_id, created_by=ObjectId(user["id"]))
-
+    invite = await _create_invitation(db, family_id, ObjectId(user["id"]))
     return {"family_id": str(family_id), "invite": invite}
 
 
+# ---------------- INVITE ----------------
+
 @router.post("/invite")
 async def create_invite(payload: InviteCreate, db=Depends(get_db), user=Depends(get_current_user)):
-    """Create a new, time-limited invite code for a family (owner only)."""
-    try:
-        family_id = ObjectId(payload.family_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid family_id")
+    family_id = ObjectId(payload.family_id)
 
-    family = await db["families"].find_one({"_id": family_id}, {"_id": 1})
-    if not family:
-        raise HTTPException(status_code=404, detail="Family not found")
-
-    await _require_owner(db, user_id=user["id"], family_id=family_id)
-    invite = await _create_invitation(db, family_id=family_id, created_by=ObjectId(user["id"]))
+    await _require_owner(db, user["id"], family_id)
+    invite = await _create_invitation(db, family_id, ObjectId(user["id"]))
     return {"family_id": payload.family_id, "invite": invite}
 
 
+# ---------------- JOIN ----------------
+
 @router.post("/join")
 async def join_family(payload: JoinFamily, db=Depends(get_db), user=Depends(get_current_user)):
-    """Join a family by a single-use, time-limited invite code."""
     code = payload.invite_code.strip().upper()
     if not code:
         raise HTTPException(status_code=400, detail="Invite code required")
 
     now = datetime.utcnow()
-    invite = await db["invitations"].find_one({"code": code}, {"_id": 1, "family_id": 1, "expires_at": 1, "used": 1})
-    if not invite:
-        raise HTTPException(status_code=404, detail="Invalid invite code")
+    invite = await db["invitations"].find_one({"code": code})
+    if not invite or invite.get("used"):
+        raise HTTPException(status_code=400, detail="Invalid invite")
 
-    if invite.get("used"):
-        raise HTTPException(status_code=400, detail="Invite already used")
-
-    expires_at = invite.get("expires_at")
-    if expires_at and expires_at < now:
+    if invite.get("expires_at") and invite["expires_at"] < now:
         raise HTTPException(status_code=400, detail="Invite expired")
 
     family_id = invite["family_id"]
 
     existing = await db["family_members"].find_one(
-        {"family_id": family_id, "user_id": ObjectId(user["id"])},
-        {"_id": 1},
+        {"family_id": family_id, "user_id": ObjectId(user["id"])}
     )
     if existing:
         raise HTTPException(status_code=400, detail="Already a member")
 
-    # Mark invite as used first (best-effort guard against race conditions)
-    updated = await db["invitations"].update_one(
-        {"_id": invite["_id"], "used": False},
-        {"$set": {"used": True, "used_at": now, "used_by": ObjectId(user["id"])}},
+    await db["invitations"].update_one(
+        {"_id": invite["_id"]},
+        {"$set": {"used": True, "used_at": now}},
     )
-    if updated.modified_count != 1:
-        raise HTTPException(status_code=400, detail="Invite already used")
+
+    u = await db["users"].find_one({"_id": ObjectId(user["id"])}, {"first_name": 1, "email": 1})
+    base = (u or {}).get("first_name") or ((u or {}).get("email") or "").split("@")[0]
+    display_name = await _pick_unique_display_name(db, family_id, base)
 
     member_doc = {
         "family_id": family_id,
         "user_id": ObjectId(user["id"]),
         "role": "member",
+        "display_name": display_name,
+        "sharing_enabled": True,
         "joined_at": now,
     }
-    await db["family_members"].insert_one(member_doc)
 
+    await db["family_members"].insert_one(member_doc)
     return {"message": "Joined successfully"}
 
 
-@router.get("/me")
-async def my_families(db=Depends(get_db), user=Depends(get_current_user)):
-    """List families the current user is a member of."""
-    cursor = db["family_members"].find({"user_id": ObjectId(user["id"])})
-    memberships = await cursor.to_list(length=200)
+# ---------------- SHARING CONTROL ----------------
 
-    if not memberships:
-        return {"families": []}
+@router.post("/{family_id}/sharing/enable")
+async def enable_sharing(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
+    fid = ObjectId(family_id)
 
-    family_ids = [m["family_id"] for m in memberships]
-    fam_cursor = db["families"].find({"_id": {"$in": family_ids}})
-    families = await fam_cursor.to_list(length=200)
+    await db["family_members"].update_one(
+        {"family_id": fid, "user_id": ObjectId(user["id"])},
+        {"$set": {"sharing_enabled": True}},
+    )
 
-    fam_map = {str(f["_id"]): f for f in families}
-    out = []
-    for m in memberships:
-        fid = str(m["family_id"])
-        f = fam_map.get(fid)
-        if not f:
-            continue
-        out.append({
-            "id": fid,
-            "name": f.get("name", ""),
-            "role": m.get("role", "member"),
-        })
-    return {"families": out}
+    return {"status": "sharing_enabled"}
 
+
+@router.post("/{family_id}/sharing/disable")
+async def disable_sharing(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
+    fid = ObjectId(family_id)
+
+    await db["family_members"].update_one(
+        {"family_id": fid, "user_id": ObjectId(user["id"])},
+        {"$set": {"sharing_enabled": False}},
+    )
+
+    return {"status": "sharing_disabled"}
+
+
+# ---------------- MEMBERS ----------------
 
 @router.get("/{family_id}/members")
 async def family_members(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
-    """List members of a family (must be member). Includes first_name/last_name if stored."""
-    try:
-        fid = ObjectId(family_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid family_id")
+    fid = ObjectId(family_id)
 
-    # must be member
     membership = await db["family_members"].find_one(
-        {"family_id": fid, "user_id": ObjectId(user["id"])},
-        {"_id": 1},
+        {"family_id": fid, "user_id": ObjectId(user["id"])}
     )
     if not membership:
-        raise HTTPException(status_code=403, detail="Not a member of this family")
+        raise HTTPException(status_code=403, detail="Not a member")
 
-    cursor = db["family_members"].find({"family_id": fid})
-    members = await cursor.to_list(length=500)
-
-    user_ids = [m["user_id"] for m in members if m.get("user_id")]
-    users = []
-    if user_ids:
-        ucur = db["users"].find({"_id": {"$in": user_ids}}, {"email": 1, "first_name": 1, "last_name": 1, "display_name": 1})
-        users = await ucur.to_list(length=500)
-    user_map = {str(u["_id"]): u for u in users}
+    members = await db["family_members"].find({"family_id": fid}).to_list(500)
 
     out = []
     for m in members:
-        uid = str(m["user_id"])
-        u = user_map.get(uid, {})
         out.append({
-            "user_id": uid,
-            "email": u.get("email", ""),
-            "first_name": u.get("first_name") or u.get("display_name"),
-            "last_name": u.get("last_name"),
-            "role": m.get("role", "member"),
-            "joined_at": (m.get("joined_at").isoformat() + "Z") if getattr(m.get("joined_at", None), "isoformat", None) else m.get("joined_at"),
+            "user_id": str(m["user_id"]),
+            "display_name": m.get("display_name"),
+            "role": m.get("role"),
+            "sharing_enabled": m.get("sharing_enabled", True),
+            "joined_at": m.get("joined_at").isoformat() + "Z",
         })
 
     return {"family_id": family_id, "members": out}
-
