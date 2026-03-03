@@ -180,7 +180,6 @@ async def join_family(payload: JoinFamily, db=Depends(get_db), user=Depends(get_
 
 @router.get("/me")
 async def my_families(db=Depends(get_db), user=Depends(get_current_user)):
-    """List families the current user is a member of."""
     uid = ObjectId(user["id"])
 
     memberships = await db["family_members"].find(
@@ -214,6 +213,60 @@ async def my_families(db=Depends(get_db), user=Depends(get_current_user)):
         )
 
     return {"families": out}
+
+
+# ---------------- LEAVE FAMILY ----------------
+
+@router.post("/{family_id}/leave")
+async def leave_family(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
+
+    membership = await db["family_members"].find_one(
+        {"family_id": fid, "user_id": ObjectId(user["id"])},
+        {"role": 1},
+    )
+    if not membership:
+        raise HTTPException(status_code=404, detail="Not a member")
+
+    if membership.get("role") == "owner":
+        raise HTTPException(
+            status_code=400,
+            detail="Als Inhaber kannst du nicht austreten. Übertrage zuerst die Inhaberschaft oder lösche die Familie.",
+        )
+
+    await db["family_members"].delete_one(
+        {"family_id": fid, "user_id": ObjectId(user["id"])}
+    )
+
+    return {"status": "left", "family_id": family_id}
+
+
+# ---------------- DELETE FAMILY (owner only) ----------------
+
+@router.delete("/{family_id}", status_code=status.HTTP_200_OK)
+async def delete_family(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
+
+    await _require_owner(db, user_id=user["id"], family_id=fid)
+
+    await db["families"].delete_one({"_id": fid})
+    await db["family_members"].delete_many({"family_id": fid})
+    await db["invitations"].delete_many({"family_id": fid})
+
+    # Best-effort cleanup for optional collections (ignore if they don't exist)
+    for coll in ("locations", "location_updates", "member_locations", "geofences", "pins", "statuses"):
+        try:
+            await db[coll].delete_many({"family_id": fid})
+        except Exception:
+            pass
+
+    return {"status": "deleted", "family_id": family_id}
 
 
 # ---------------- SHARING CONTROL ----------------
