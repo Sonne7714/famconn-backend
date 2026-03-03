@@ -120,7 +120,10 @@ async def create_family(payload: FamilyCreate, db=Depends(get_db), user=Depends(
 
 @router.post("/invite")
 async def create_invite(payload: InviteCreate, db=Depends(get_db), user=Depends(get_current_user)):
-    family_id = ObjectId(payload.family_id)
+    try:
+        family_id = ObjectId(payload.family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
 
     await _require_owner(db, user["id"], family_id)
     invite = await _create_invitation(db, family_id, ObjectId(user["id"]))
@@ -173,6 +176,46 @@ async def join_family(payload: JoinFamily, db=Depends(get_db), user=Depends(get_
     return {"message": "Joined successfully"}
 
 
+# ---------------- MY FAMILIES (needed by mobile app) ----------------
+
+@router.get("/me")
+async def my_families(db=Depends(get_db), user=Depends(get_current_user)):
+    """List families the current user is a member of."""
+    uid = ObjectId(user["id"])
+
+    memberships = await db["family_members"].find(
+        {"user_id": uid},
+        {"family_id": 1, "role": 1, "_id": 0},
+    ).to_list(length=500)
+
+    if not memberships:
+        return {"families": []}
+
+    family_ids = [m["family_id"] for m in memberships if m.get("family_id")]
+    families = await db["families"].find(
+        {"_id": {"$in": family_ids}},
+        {"name": 1},
+    ).to_list(length=500)
+
+    fam_map = {str(f["_id"]): f for f in families}
+
+    out = []
+    for m in memberships:
+        fid = str(m["family_id"])
+        f = fam_map.get(fid)
+        if not f:
+            continue
+        out.append(
+            {
+                "id": fid,
+                "name": f.get("name", ""),
+                "role": m.get("role", "member"),
+            }
+        )
+
+    return {"families": out}
+
+
 # ---------------- SHARING CONTROL ----------------
 
 @router.post("/{family_id}/sharing/enable")
@@ -215,12 +258,13 @@ async def family_members(family_id: str, db=Depends(get_db), user=Depends(get_cu
 
     out = []
     for m in members:
+        joined_at = m.get("joined_at")
         out.append({
             "user_id": str(m["user_id"]),
             "display_name": m.get("display_name"),
             "role": m.get("role"),
             "sharing_enabled": m.get("sharing_enabled", True),
-            "joined_at": m.get("joined_at").isoformat() + "Z",
+            "joined_at": (joined_at.isoformat() + "Z") if getattr(joined_at, "isoformat", None) else joined_at,
         })
 
     return {"family_id": family_id, "members": out}
