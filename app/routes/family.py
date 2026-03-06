@@ -213,7 +213,7 @@ async def my_families(db=Depends(get_db), user=Depends(get_current_user)):
         return {"families": []}
 
     family_ids = [m["family_id"] for m in memberships]
-    fam_cursor = db["families"].find({"_id": {"$in": family_ids}})
+    fam_cursor = db["families"].find({"_id": {"$in": family_ids}}).sort("name", 1)
     families = await fam_cursor.to_list(length=200)
     fam_map = {str(f["_id"]): f for f in families}
 
@@ -323,7 +323,7 @@ async def family_members(family_id: str, db=Depends(get_db), user=Depends(get_cu
     if not membership:
         raise HTTPException(status_code=403, detail="Not a member")
 
-    members = await db["family_members"].find({"family_id": fid}).to_list(500)
+    members = await db["family_members"].find({"family_id": fid}).sort("display_name", 1).to_list(500)
 
     out = []
     for m in members:
