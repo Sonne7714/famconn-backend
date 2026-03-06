@@ -232,6 +232,59 @@ async def my_families(db=Depends(get_db), user=Depends(get_current_user)):
     return {"families": out}
 
 
+# ---------------- LEAVE / DELETE FAMILY ----------------
+
+@router.post("/{family_id}/leave")
+async def leave_family(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
+
+    membership = await db["family_members"].find_one(
+        {"family_id": fid, "user_id": ObjectId(user["id"])},
+        {"role": 1},
+    )
+    if not membership:
+        raise HTTPException(status_code=404, detail="Not a member")
+
+    if membership.get("role") == "owner":
+        raise HTTPException(
+            status_code=400,
+            detail="Als Inhaber kannst du nicht austreten. Lösche die Familie oder übertrage die Inhaberschaft.",
+        )
+
+    res = await db["family_members"].delete_one(
+        {"family_id": fid, "user_id": ObjectId(user["id"])}
+    )
+    if res.deleted_count != 1:
+        raise HTTPException(status_code=404, detail="Not a member")
+
+    return {"status": "left", "family_id": family_id}
+
+
+@router.delete("/{family_id}")
+async def delete_family(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
+
+    await _require_owner(db, user["id"], fid)
+
+    await db["families"].delete_one({"_id": fid})
+    await db["family_members"].delete_many({"family_id": fid})
+    await db["invitations"].delete_many({"family_id": fid})
+
+    for coll in ("family_places", "locations", "location_updates", "member_locations", "statuses", "geofences", "pins"):
+        try:
+            await db[coll].delete_many({"family_id": fid})
+        except Exception:
+            pass
+
+    return {"status": "deleted", "family_id": family_id}
+
+
 # ---------------- SHARING CONTROL ----------------
 
 @router.post("/{family_id}/sharing/enable")
