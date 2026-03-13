@@ -13,11 +13,9 @@ from app.routes import family
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response: Response = await call_next(request)
-        # Sensible default headers for APIs
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Frame-Options", "DENY")
-        # If you later serve HTML, consider a CSP. For pure JSON API we keep it simple.
         return response
 
 
@@ -28,22 +26,20 @@ app = FastAPI(
 
 app.add_middleware(SecurityHeadersMiddleware)
 
-# CORS (mainly for future web tooling; React Native isn't restricted the same way,
-# but keeping it here helps for web admin/app)
-origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
-if origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# CORS
+# Für den Test bewusst offen, damit Web-Login sicher nicht an CORS scheitert.
+# Wenn danach alles läuft, stellen wir es wieder auf konkrete Origins um.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
 async def _startup():
-    # Basic safety check for production
     if settings.ENV.lower() == "production" and settings.JWT_SECRET in ("CHANGE_ME", "", None):
         raise RuntimeError("JWT_SECRET is not set. Configure a strong secret in your environment.")
 
