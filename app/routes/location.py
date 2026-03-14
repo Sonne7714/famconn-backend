@@ -77,3 +77,71 @@ async def update_location(payload: dict, db=Depends(get_db), user=Depends(get_cu
     )
 
     return {"status": "ok", "derived_status": derived_status}
+
+
+@router.get("/family/{family_id}/members")
+async def get_family_member_locations(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
+
+    membership = await db["family_members"].find_one(
+        {"family_id": fid, "user_id": ObjectId(user["id"])},
+        {"_id": 1},
+    )
+    if not membership:
+        raise HTTPException(status_code=403, detail="Not a member of this family")
+
+    family_members = await db["family_members"].find(
+        {"family_id": fid},
+        {"user_id": 1, "display_name": 1, "role": 1, "sharing_enabled": 1},
+    ).to_list(length=500)
+
+    user_ids = [m["user_id"] for m in family_members]
+    locations = await db["locations"].find(
+        {"family_id": fid, "user_id": {"$in": user_ids}},
+        {
+            "user_id": 1,
+            "lat": 1,
+            "lng": 1,
+            "accuracy_m": 1,
+            "source": 1,
+            "derived_status": 1,
+            "created_at": 1,
+        },
+    ).to_list(length=500)
+
+    loc_map = {str(loc["user_id"]): loc for loc in locations}
+
+    out = []
+    for m in family_members:
+        uid = str(m["user_id"])
+        loc = loc_map.get(uid)
+
+        item = {
+            "user_id": uid,
+            "display_name": m.get("display_name") or "Mitglied",
+            "role": m.get("role") or "member",
+            "sharing_enabled": m.get("sharing_enabled", True),
+            "has_location": loc is not None,
+        }
+
+        if loc:
+            item.update(
+                {
+                    "lat": loc.get("lat"),
+                    "lng": loc.get("lng"),
+                    "accuracy_m": loc.get("accuracy_m"),
+                    "source": loc.get("source"),
+                    "derived_status": loc.get("derived_status"),
+                    "updated_at": loc.get("created_at").isoformat() + "Z"
+                    if loc.get("created_at")
+                    else None,
+                }
+            )
+
+        out.append(item)
+
+    out.sort(key=lambda x: (x.get("display_name") or "").lower())
+    return {"family_id": family_id, "members": out}
