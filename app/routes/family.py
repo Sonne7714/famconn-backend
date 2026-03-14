@@ -16,7 +16,6 @@ from app.models.family import (
     InviteCreate,
     JoinFamily,
     PlaceCreate,
-    PlaceOut,
     PlaceUpdate,
 )
 
@@ -122,7 +121,6 @@ async def create_family(payload: FamilyCreate, db=Depends(get_db), user=Depends(
     result = await db["families"].insert_one(family_doc)
     family_id = result.inserted_id
 
-    # Fetch user for display name
     u = await db["users"].find_one({"_id": ObjectId(user["id"])}, {"first_name": 1, "email": 1})
     base = (u or {}).get("first_name") or ((u or {}).get("email") or "").split("@")[0]
     display_name = await _pick_unique_display_name(db, family_id, base)
@@ -213,7 +211,7 @@ async def my_families(db=Depends(get_db), user=Depends(get_current_user)):
         return {"families": []}
 
     family_ids = [m["family_id"] for m in memberships]
-    fam_cursor = db["families"].find({"_id": {"$in": family_ids}}).sort("name", 1)
+    fam_cursor = db["families"].find({"_id": {"$in": family_ids}})
     families = await fam_cursor.to_list(length=200)
     fam_map = {str(f["_id"]): f for f in families}
 
@@ -223,73 +221,26 @@ async def my_families(db=Depends(get_db), user=Depends(get_current_user)):
         f = fam_map.get(fid)
         if not f:
             continue
-        out.append({
-            "id": fid,
-            "name": f.get("name", ""),
-            "role": m.get("role", "member"),
-        })
-
-    return {"families": out}
-
-
-# ---------------- LEAVE / DELETE FAMILY ----------------
-
-@router.post("/{family_id}/leave")
-async def leave_family(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
-    try:
-        fid = ObjectId(family_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid family_id")
-
-    membership = await db["family_members"].find_one(
-        {"family_id": fid, "user_id": ObjectId(user["id"])},
-        {"role": 1},
-    )
-    if not membership:
-        raise HTTPException(status_code=404, detail="Not a member")
-
-    if membership.get("role") == "owner":
-        raise HTTPException(
-            status_code=400,
-            detail="Als Inhaber kannst du nicht austreten. Lösche die Familie oder übertrage die Inhaberschaft.",
+        out.append(
+            {
+                "id": fid,
+                "name": f.get("name", ""),
+                "role": m.get("role", "member"),
+            }
         )
 
-    res = await db["family_members"].delete_one(
-        {"family_id": fid, "user_id": ObjectId(user["id"])}
-    )
-    if res.deleted_count != 1:
-        raise HTTPException(status_code=404, detail="Not a member")
-
-    return {"status": "left", "family_id": family_id}
-
-
-@router.delete("/{family_id}")
-async def delete_family(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
-    try:
-        fid = ObjectId(family_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid family_id")
-
-    await _require_owner(db, user["id"], fid)
-
-    await db["families"].delete_one({"_id": fid})
-    await db["family_members"].delete_many({"family_id": fid})
-    await db["invitations"].delete_many({"family_id": fid})
-
-    for coll in ("family_places", "locations", "location_updates", "member_locations", "statuses", "geofences", "pins"):
-        try:
-            await db[coll].delete_many({"family_id": fid})
-        except Exception:
-            pass
-
-    return {"status": "deleted", "family_id": family_id}
+    out.sort(key=lambda x: (x.get("name") or "").lower())
+    return {"families": out}
 
 
 # ---------------- SHARING CONTROL ----------------
 
 @router.post("/{family_id}/sharing/enable")
 async def enable_sharing(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
-    fid = ObjectId(family_id)
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
 
     await db["family_members"].update_one(
         {"family_id": fid, "user_id": ObjectId(user["id"])},
@@ -301,7 +252,10 @@ async def enable_sharing(family_id: str, db=Depends(get_db), user=Depends(get_cu
 
 @router.post("/{family_id}/sharing/disable")
 async def disable_sharing(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
-    fid = ObjectId(family_id)
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
 
     await db["family_members"].update_one(
         {"family_id": fid, "user_id": ObjectId(user["id"])},
@@ -315,7 +269,10 @@ async def disable_sharing(family_id: str, db=Depends(get_db), user=Depends(get_c
 
 @router.get("/{family_id}/members")
 async def family_members(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
-    fid = ObjectId(family_id)
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
 
     membership = await db["family_members"].find_one(
         {"family_id": fid, "user_id": ObjectId(user["id"])}
@@ -323,18 +280,22 @@ async def family_members(family_id: str, db=Depends(get_db), user=Depends(get_cu
     if not membership:
         raise HTTPException(status_code=403, detail="Not a member")
 
-    members = await db["family_members"].find({"family_id": fid}).sort("display_name", 1).to_list(500)
+    members = await db["family_members"].find({"family_id": fid}).to_list(500)
 
     out = []
     for m in members:
-        out.append({
-            "user_id": str(m["user_id"]),
-            "display_name": m.get("display_name"),
-            "role": m.get("role"),
-            "sharing_enabled": m.get("sharing_enabled", True),
-            "joined_at": m.get("joined_at").isoformat() + "Z",
-        })
+        joined_at = m.get("joined_at")
+        out.append(
+            {
+                "user_id": str(m["user_id"]),
+                "display_name": m.get("display_name"),
+                "role": m.get("role"),
+                "sharing_enabled": m.get("sharing_enabled", True),
+                "joined_at": joined_at.isoformat() + "Z" if joined_at else None,
+            }
+        )
 
+    out.sort(key=lambda x: (x.get("display_name") or "").lower())
     return {"family_id": family_id, "members": out}
 
 
@@ -342,30 +303,42 @@ async def family_members(family_id: str, db=Depends(get_db), user=Depends(get_cu
 
 @router.get("/{family_id}/places")
 async def list_places(family_id: str, db=Depends(get_db), user=Depends(get_current_user)):
-    fid = ObjectId(family_id)
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
+
     await _require_member(db, user["id"], fid)
 
     places = await db["family_places"].find({"family_id": fid}).sort("name", 1).to_list(500)
     out = []
     for p in places:
-        out.append({
-            "id": str(p["_id"]),
-            "family_id": str(p["family_id"]),
-            "name": p.get("name", ""),
-            "lat": p.get("lat"),
-            "lng": p.get("lng"),
-            "radius_m": int(p.get("radius_m", 100)),
-            "created_by": str(p.get("created_by")) if p.get("created_by") else "",
-            "created_at": p.get("created_at").isoformat() + "Z" if p.get("created_at") else "",
-            "updated_at": p.get("updated_at").isoformat() + "Z" if p.get("updated_at") else None,
-        })
+        out.append(
+            {
+                "id": str(p["_id"]),
+                "family_id": str(p["family_id"]),
+                "name": p.get("name", ""),
+                "lat": p.get("lat"),
+                "lng": p.get("lng"),
+                "radius_m": int(p.get("radius_m", 100)),
+                "created_by": str(p.get("created_by")) if p.get("created_by") else "",
+                "created_at": p.get("created_at").isoformat() + "Z" if p.get("created_at") else "",
+                "updated_at": p.get("updated_at").isoformat() + "Z" if p.get("updated_at") else None,
+            }
+        )
     return {"family_id": family_id, "places": out}
 
 
 @router.post("/{family_id}/places", status_code=201)
 async def create_place(family_id: str, payload: PlaceCreate, db=Depends(get_db), user=Depends(get_current_user)):
-    fid = ObjectId(family_id)
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
+
     await _require_member(db, user["id"], fid)
+
+    now = _now()
 
     doc = {
         "family_id": fid,
@@ -374,16 +347,34 @@ async def create_place(family_id: str, payload: PlaceCreate, db=Depends(get_db),
         "lng": float(payload.lng),
         "radius_m": int(payload.radius_m),
         "created_by": ObjectId(user["id"]),
-        "created_at": _now(),
+        "created_at": now,
         "updated_at": None,
     }
+
     res = await db["family_places"].insert_one(doc)
-    return {"place": {"id": str(res.inserted_id), **{k: v for k, v in doc.items() if k != "family_id"}, "family_id": str(fid)}}
+
+    return {
+        "place": {
+            "id": str(res.inserted_id),
+            "family_id": str(fid),
+            "name": doc["name"],
+            "lat": doc["lat"],
+            "lng": doc["lng"],
+            "radius_m": doc["radius_m"],
+            "created_by": str(doc["created_by"]),
+            "created_at": now.isoformat() + "Z",
+            "updated_at": None,
+        }
+    }
 
 
 @router.put("/{family_id}/places/{place_id}")
 async def update_place(family_id: str, place_id: str, payload: PlaceUpdate, db=Depends(get_db), user=Depends(get_current_user)):
-    fid = ObjectId(family_id)
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
+
     await _require_member(db, user["id"], fid)
 
     try:
@@ -410,7 +401,11 @@ async def update_place(family_id: str, place_id: str, payload: PlaceUpdate, db=D
 
 @router.delete("/{family_id}/places/{place_id}")
 async def delete_place(family_id: str, place_id: str, db=Depends(get_db), user=Depends(get_current_user)):
-    fid = ObjectId(family_id)
+    try:
+        fid = ObjectId(family_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid family_id")
+
     await _require_member(db, user["id"], fid)
 
     try:
@@ -425,7 +420,6 @@ async def delete_place(family_id: str, place_id: str, db=Depends(get_db), user=D
 
 
 def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    # Earth radius in meters
     r = 6371000.0
     dlat = radians(lat2 - lat1)
     dlng = radians(lng2 - lng1)
@@ -435,8 +429,11 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 
 async def derive_status_from_places(db, family_id: ObjectId, lat: float, lng: float) -> str:
-    # pick nearest matching place within its radius
-    places = await db["family_places"].find({"family_id": family_id}, {"name": 1, "lat": 1, "lng": 1, "radius_m": 1}).to_list(500)
+    places = await db["family_places"].find(
+        {"family_id": family_id},
+        {"name": 1, "lat": 1, "lng": 1, "radius_m": 1},
+    ).to_list(500)
+
     best_name = None
     best_dist = None
     for p in places:
@@ -448,4 +445,5 @@ async def derive_status_from_places(db, family_id: ObjectId, lat: float, lng: fl
             if best_dist is None or dist < best_dist:
                 best_dist = dist
                 best_name = (p.get("name") or "").strip() or None
+
     return best_name or "Unterwegs"
