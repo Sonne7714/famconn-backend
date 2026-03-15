@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -30,7 +31,6 @@ async def update_location(payload: dict, db=Depends(get_db), user=Depends(get_cu
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid family_id")
 
-    # must be member AND sharing enabled
     membership = await db["family_members"].find_one(
         {"family_id": fid, "user_id": ObjectId(user["id"])},
         {"_id": 1, "sharing_enabled": 1},
@@ -69,7 +69,6 @@ async def update_location(payload: dict, db=Depends(get_db), user=Depends(get_cu
         "created_at": now,
     }
 
-    # Upsert last location per user+family
     await db["locations"].update_one(
         {"family_id": fid, "user_id": ObjectId(user["id"])},
         {"$set": doc},
@@ -128,13 +127,42 @@ async def get_family_member_locations(family_id: str, db=Depends(get_db), user=D
         }
 
         if loc:
+            lat = loc.get("lat")
+            lng = loc.get("lng")
+
+            recalculated_status = None
+            if lat is not None and lng is not None:
+                try:
+                    recalculated_status = await derive_status_from_places(
+                        db,
+                        fid,
+                        float(lat),
+                        float(lng),
+                    )
+                except Exception:
+                    recalculated_status = loc.get("derived_status") or "Unterwegs"
+            else:
+                recalculated_status = loc.get("derived_status") or "Unterwegs"
+
+            stored_status = loc.get("derived_status")
+            if recalculated_status != stored_status:
+                await db["locations"].update_one(
+                    {"family_id": fid, "user_id": ObjectId(uid)},
+                    {
+                        "$set": {
+                            "derived_status": recalculated_status,
+                            "status_source": "geofence",
+                        }
+                    },
+                )
+
             item.update(
                 {
-                    "lat": loc.get("lat"),
-                    "lng": loc.get("lng"),
+                    "lat": lat,
+                    "lng": lng,
                     "accuracy_m": loc.get("accuracy_m"),
                     "source": loc.get("source"),
-                    "derived_status": loc.get("derived_status"),
+                    "derived_status": recalculated_status,
                     "updated_at": loc.get("created_at").isoformat() + "Z"
                     if loc.get("created_at")
                     else None,
