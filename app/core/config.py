@@ -34,5 +34,8 @@ class Settings(BaseSettings):
     # CORS (comma-separated)
     CORS_ORIGINS: str = ""
 
+    # Expo Push
+    EXPO_PUSH_ACCESS_TOKEN: str = ""
+
 
 settings = Settings()
