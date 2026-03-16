@@ -398,6 +398,18 @@ async def update_place(family_id: str, place_id: str, payload: PlaceUpdate, db=D
 
     return {"status": "updated"}
 
+@router.get("/families/{family_id}/events")
+async def get_family_events(family_id: str, user=Depends(get_current_user)):
+
+    events = await db.family_events.find(
+        {"family_id": family_id}
+    ).sort("created_at", -1).limit(50).to_list(50)
+
+    for e in events:
+        e["id"] = str(e["_id"])
+        del e["_id"]
+
+    return {"events": events}
 
 @router.delete("/{family_id}/places/{place_id}")
 async def delete_place(family_id: str, place_id: str, db=Depends(get_db), user=Depends(get_current_user)):

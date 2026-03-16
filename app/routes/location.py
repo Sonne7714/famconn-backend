@@ -43,7 +43,7 @@ async def _create_location_transition_events(
     prev = _status_label(previous_status)
     curr = _status_label(next_status)
 
-    # Beim allerersten Standort keine Events erzeugen
+    # Beim allerersten bekannten Standort keine Events erzeugen
     if previous_status is None:
         return []
 
@@ -92,7 +92,7 @@ async def _create_location_transition_events(
             }
         )
 
-    # Direkter Wechsel von Ort A nach Ort B
+    # Wechsel von Ort A nach Ort B
     elif _is_place_status(prev) and _is_place_status(curr) and prev != curr:
         docs.append(
             {
@@ -349,22 +349,27 @@ async def get_family_location_events(
 
     safe_limit = max(1, min(int(limit or 50), 100))
 
-    events = await db["location_events"].find(
-        {"family_id": fid},
-        {
-            "user_id": 1,
-            "display_name": 1,
-            "event_type": 1,
-            "place_name": 1,
-            "from_status": 1,
-            "to_status": 1,
-            "lat": 1,
-            "lng": 1,
-            "accuracy_m": 1,
-            "source": 1,
-            "occurred_at": 1,
-        },
-    ).sort("occurred_at", -1).to_list(length=safe_limit)
+    events = (
+        await db["location_events"]
+        .find(
+            {"family_id": fid},
+            {
+                "user_id": 1,
+                "display_name": 1,
+                "event_type": 1,
+                "place_name": 1,
+                "from_status": 1,
+                "to_status": 1,
+                "lat": 1,
+                "lng": 1,
+                "accuracy_m": 1,
+                "source": 1,
+                "occurred_at": 1,
+            },
+        )
+        .sort("occurred_at", -1)
+        .to_list(length=safe_limit)
+    )
 
     out = []
     for ev in events:
