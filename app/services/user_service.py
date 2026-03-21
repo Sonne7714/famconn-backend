@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
+
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
@@ -9,8 +10,6 @@ from app.core.db import get_db
 from app.core.security import hash_password, verify_password, hash_refresh_token
 from app.models.user import utcnow
 
-def _oid_str(oid: ObjectId) -> str:
-    return str(oid)
 
 class UserService:
     @staticmethod
@@ -26,7 +25,13 @@ class UserService:
         return await db["users"].find_one({"_id": ObjectId(user_id)})
 
     @staticmethod
-    async def create_user(email: str, password: str, display_name: Optional[str], first_name: Optional[str] = None, last_name: Optional[str] = None) -> dict:
+    async def create_user(
+        email: str,
+        password: str,
+        display_name: Optional[str],
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+    ) -> dict:
         db = get_db()
         doc = {
             "email": email.strip().lower(),
@@ -34,9 +39,9 @@ class UserService:
             "display_name": display_name,
             "first_name": first_name or display_name,
             "last_name": last_name,
+            "avatar_url": None,
             "disabled": False,
             "created_at": utcnow(),
-            # refresh token rotation fields:
             "refresh_token_hash": None,
             "refresh_token_expires_at": None,
         }
@@ -44,6 +49,7 @@ class UserService:
             res = await db["users"].insert_one(doc)
         except DuplicateKeyError as e:
             raise ValueError("email_exists") from e
+
         doc["_id"] = res.inserted_id
         return doc
 
@@ -59,14 +65,52 @@ class UserService:
         return user
 
     @staticmethod
+    async def update_profile(
+        user_id: str,
+        *,
+        display_name: Optional[str],
+        first_name: Optional[str],
+        last_name: Optional[str],
+    ) -> Optional[dict]:
+        db = get_db()
+        if not ObjectId.is_valid(user_id):
+            return None
+
+        patch = {
+            "display_name": (display_name or "").strip() or None,
+            "first_name": (first_name or "").strip() or None,
+            "last_name": (last_name or "").strip() or None,
+        }
+
+        await db["users"].update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": patch},
+        )
+        return await db["users"].find_one({"_id": ObjectId(user_id)})
+
+    @staticmethod
+    async def set_avatar_url(user_id: str, avatar_url: Optional[str]) -> Optional[dict]:
+        db = get_db()
+        if not ObjectId.is_valid(user_id):
+            return None
+
+        await db["users"].update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"avatar_url": avatar_url}},
+        )
+        return await db["users"].find_one({"_id": ObjectId(user_id)})
+
+    @staticmethod
     async def set_refresh_token(user_id: str, refresh_token: str, refresh_expires_at: datetime) -> None:
         db = get_db()
         await db["users"].update_one(
             {"_id": ObjectId(user_id)},
-            {"$set": {
-                "refresh_token_hash": hash_refresh_token(refresh_token),
-                "refresh_token_expires_at": refresh_expires_at,
-            }},
+            {
+                "$set": {
+                    "refresh_token_hash": hash_refresh_token(refresh_token),
+                    "refresh_token_expires_at": refresh_expires_at,
+                }
+            },
         )
 
     @staticmethod
@@ -76,8 +120,8 @@ class UserService:
         if not token_hash or not exp:
             return False
 
-        # Motor/PyMongo often returns naive UTC datetimes; normalize to aware UTC.
         from datetime import timezone
+
         if getattr(exp, "tzinfo", None) is None:
             exp = exp.replace(tzinfo=timezone.utc)
 

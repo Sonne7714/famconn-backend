@@ -21,11 +21,6 @@ class UserCreate(BaseModel):
     @field_validator("password")
     @classmethod
     def _password_policy(cls, v: str) -> str:
-        # Minimal sensible policy (no overkill):
-        # - at least 8 chars (Field)
-        # - at least 1 letter
-        # - at least 1 digit
-        # - no leading/trailing spaces
         pwd = v.strip()
         if pwd != v:
             raise ValueError("Password must not start or end with spaces")
@@ -46,12 +41,24 @@ class UserLogin(BaseModel):
         return str(v).strip().lower()
 
 
+class UserProfileUpdate(BaseModel):
+    display_name: Optional[str] = Field(default=None, max_length=80)
+    first_name: Optional[str] = Field(default=None, max_length=60)
+    last_name: Optional[str] = Field(default=None, max_length=60)
+
+
+class AvatarUploadRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=200)
+    data_url: str = Field(min_length=20)
+
+
 class UserPublic(BaseModel):
     id: str = Field(alias="_id")
     email: EmailStr
     display_name: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    avatar_url: Optional[str] = None
     disabled: bool = False
     created_at: datetime
 

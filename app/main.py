@@ -1,13 +1,16 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from app.core.config import settings
-from app.core.db import connect_to_mongo, close_mongo_connection
+from app.core.db import close_mongo_connection, connect_to_mongo
+from app.routes import family
 from app.routes.auth import router as auth_router
 from app.routes.location import router as location_router
-from app.routes import family
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -26,9 +29,6 @@ app = FastAPI(
 
 app.add_middleware(SecurityHeadersMiddleware)
 
-# CORS
-# Für den Test bewusst offen, damit Web-Login sicher nicht an CORS scheitert.
-# Wenn danach alles läuft, stellen wir es wieder auf konkrete Origins um.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,12 +37,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+Path("uploads/avatars").mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
 
 @app.on_event("startup")
 async def _startup():
     if settings.ENV.lower() == "production" and settings.JWT_SECRET in ("CHANGE_ME", "", None):
         raise RuntimeError("JWT_SECRET is not set. Configure a strong secret in your environment.")
-
     await connect_to_mongo()
 
 
