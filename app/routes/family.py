@@ -282,13 +282,27 @@ async def family_members(family_id: str, db=Depends(get_db), user=Depends(get_cu
 
     members = await db["family_members"].find({"family_id": fid}).to_list(500)
 
+    user_ids = [m["user_id"] for m in members if m.get("user_id")]
+    users = await db["users"].find(
+        {"_id": {"$in": user_ids}},
+        {"avatar_url": 1, "first_name": 1, "last_name": 1, "display_name": 1, "email": 1},
+    ).to_list(length=500)
+    user_map = {str(u["_id"]): u for u in users}
+
     out = []
     for m in members:
+        uid = str(m["user_id"])
+        u = user_map.get(uid, {})
         joined_at = m.get("joined_at")
         out.append(
             {
-                "user_id": str(m["user_id"]),
+                "user_id": uid,
                 "display_name": m.get("display_name"),
+                "first_name": u.get("first_name"),
+                "last_name": u.get("last_name"),
+                "user_display_name": u.get("display_name"),
+                "email": u.get("email"),
+                "avatar_url": u.get("avatar_url"),
                 "role": m.get("role"),
                 "sharing_enabled": m.get("sharing_enabled", True),
                 "joined_at": joined_at.isoformat() + "Z" if joined_at else None,

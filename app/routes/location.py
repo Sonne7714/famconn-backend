@@ -429,6 +429,12 @@ async def get_family_member_locations(
     ).to_list(length=500)
 
     user_ids = [m["user_id"] for m in family_members]
+    users = await db["users"].find(
+        {"_id": {"$in": user_ids}},
+        {"avatar_url": 1, "first_name": 1, "last_name": 1, "display_name": 1, "email": 1},
+    ).to_list(length=500)
+    user_map = {str(u["_id"]): u for u in users}
+
     locations = await db["locations"].find(
         {"family_id": fid, "user_id": {"$in": user_ids}},
         {
@@ -448,10 +454,16 @@ async def get_family_member_locations(
     for m in family_members:
         uid = str(m["user_id"])
         loc = loc_map.get(uid)
+        u = user_map.get(uid, {})
 
         item = {
             "user_id": uid,
             "display_name": m.get("display_name") or "Mitglied",
+            "first_name": u.get("first_name"),
+            "last_name": u.get("last_name"),
+            "user_display_name": u.get("display_name"),
+            "email": u.get("email"),
+            "avatar_url": u.get("avatar_url"),
             "role": m.get("role") or "member",
             "sharing_enabled": m.get("sharing_enabled", True),
             "has_location": loc is not None,
@@ -548,13 +560,31 @@ async def get_family_location_events(
         .to_list(length=safe_limit)
     )
 
+    event_user_ids = [
+        ev["user_id"]
+        for ev in events
+        if ev.get("user_id") is not None
+    ]
+    users = await db["users"].find(
+        {"_id": {"$in": event_user_ids}},
+        {"avatar_url": 1, "first_name": 1, "last_name": 1, "display_name": 1, "email": 1},
+    ).to_list(length=500)
+    user_map = {str(u["_id"]): u for u in users}
+
     out = []
     for ev in events:
+        uid = str(ev.get("user_id")) if ev.get("user_id") else ""
+        u = user_map.get(uid, {})
         occurred_at = ev.get("occurred_at")
         out.append(
             {
-                "user_id": str(ev.get("user_id")) if ev.get("user_id") else "",
+                "user_id": uid,
                 "display_name": ev.get("display_name") or "Mitglied",
+                "first_name": u.get("first_name"),
+                "last_name": u.get("last_name"),
+                "user_display_name": u.get("display_name"),
+                "email": u.get("email"),
+                "avatar_url": u.get("avatar_url"),
                 "event_type": ev.get("event_type") or "",
                 "place_name": ev.get("place_name"),
                 "from_status": ev.get("from_status"),
