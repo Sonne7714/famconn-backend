@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+import math
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -16,6 +17,40 @@ from app.core.security import get_current_user
 from app.routes.family import derive_status_from_places
 
 router = APIRouter(prefix="/api/v1/location", tags=["Location"])
+
+
+LOCATION_STALE_AFTER = timedelta(minutes=30)
+LOCATION_MIN_ACCURACY_M = 0.0
+LOCATION_MAX_REASONABLE_ACCURACY_M = 5000.0
+
+
+def _is_valid_coordinate(lat: float, lng: float) -> bool:
+    return (
+        math.isfinite(lat)
+        and math.isfinite(lng)
+        and -90.0 <= lat <= 90.0
+        and -180.0 <= lng <= 180.0
+    )
+
+
+def _normalize_accuracy(value: Any) -> float | None:
+    try:
+        acc = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(acc):
+        return None
+    return max(LOCATION_MIN_ACCURACY_M, min(acc, LOCATION_MAX_REASONABLE_ACCURACY_M))
+
+
+def _is_stale_timestamp(value: datetime | None) -> bool:
+    if value is None:
+        return True
+
+    ts = value
+    if ts.tzinfo is not None:
+        ts = ts.replace(tzinfo=None)
+    return ts < (_now() - LOCATION_STALE_AFTER)
 
 
 def _now() -> datetime:
@@ -339,24 +374,33 @@ async def update_location(payload: dict, db=Depends(get_db), user=Depends(get_cu
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid lat/lng")
 
-    accuracy = payload.get("accuracy_m")
-    try:
-        accuracy_m = float(accuracy) if accuracy is not None else None
-    except Exception:
-        accuracy_m = None
+    if not _is_valid_coordinate(lat, lng):
+        raise HTTPException(status_code=400, detail="Coordinates out of range")
 
-    source = str(payload.get("source") or "unknown")
+    accuracy_m = _normalize_accuracy(payload.get("accuracy_m"))
+    source = str(payload.get("source") or "unknown").strip() or "unknown"
     now = _now()
 
     previous_location = await db["locations"].find_one(
         {"family_id": fid, "user_id": current_user_id},
-        {"derived_status": 1},
+        {"derived_status": 1, "lat": 1, "lng": 1, "updated_at": 1, "accuracy_m": 1},
     )
     previous_status = previous_location.get("derived_status") if previous_location else None
 
-    derived_status = await derive_status_from_places(db, fid, lat, lng)
+    # avoid noisy rewrites if position barely changed within a short period
+    if previous_location and previous_location.get("lat") is not None and previous_location.get("lng") is not None:
+        try:
+            prev_lat = float(previous_location.get("lat"))
+            prev_lng = float(previous_location.get("lng"))
+            moved_m = ((prev_lat - lat) ** 2 + (prev_lng - lng) ** 2) ** 0.5
+        except Exception:
+            moved_m = None
+    else:
+        moved_m = None
 
-    doc = {
+    derived_status = await derive_status_from_places(db, fid, lat, lng, accuracy_m=accuracy_m)
+
+    set_fields = {
         "family_id": fid,
         "user_id": current_user_id,
         "lat": lat,
@@ -365,12 +409,17 @@ async def update_location(payload: dict, db=Depends(get_db), user=Depends(get_cu
         "source": source,
         "derived_status": derived_status,
         "status_source": "geofence",
-        "created_at": now,
+        "updated_at": now,
+    }
+
+    update_doc = {
+        "$set": set_fields,
+        "$setOnInsert": {"created_at": now},
     }
 
     await db["locations"].update_one(
         {"family_id": fid, "user_id": current_user_id},
-        {"$set": doc},
+        update_doc,
         upsert=True,
     )
 
@@ -402,6 +451,7 @@ async def update_location(payload: dict, db=Depends(get_db), user=Depends(get_cu
         "status": "ok",
         "derived_status": derived_status,
         "events_created": len(created_events),
+        "updated_at": now.isoformat() + "Z",
     }
 
 
@@ -445,6 +495,7 @@ async def get_family_member_locations(
             "source": 1,
             "derived_status": 1,
             "created_at": 1,
+            "updated_at": 1,
         },
     ).to_list(length=500)
 
@@ -455,6 +506,7 @@ async def get_family_member_locations(
         uid = str(m["user_id"])
         loc = loc_map.get(uid)
         u = user_map.get(uid, {})
+        sharing_enabled = m.get("sharing_enabled", True)
 
         item = {
             "user_id": uid,
@@ -465,56 +517,91 @@ async def get_family_member_locations(
             "email": u.get("email"),
             "avatar_url": u.get("avatar_url"),
             "role": m.get("role") or "member",
-            "sharing_enabled": m.get("sharing_enabled", True),
-            "has_location": loc is not None,
+            "sharing_enabled": sharing_enabled,
+            "has_location": False,
+            "stale_location": False,
         }
 
-        if loc:
-            lat = loc.get("lat")
-            lng = loc.get("lng")
+        if not loc:
+            out.append(item)
+            continue
 
-            if lat is not None and lng is not None:
-                try:
-                    recalculated_status = await derive_status_from_places(
-                        db,
-                        fid,
-                        float(lat),
-                        float(lng),
-                    )
-                except Exception:
-                    recalculated_status = loc.get("derived_status") or "Unterwegs"
-            else:
-                recalculated_status = loc.get("derived_status") or "Unterwegs"
+        updated_at = loc.get("updated_at") or loc.get("created_at")
+        lat = loc.get("lat")
+        lng = loc.get("lng")
+        item["updated_at"] = updated_at.isoformat() + "Z" if updated_at else None
 
-            stored_status = loc.get("derived_status")
-            if recalculated_status != stored_status:
-                await db["locations"].update_one(
-                    {"family_id": fid, "user_id": ObjectId(uid)},
-                    {
-                        "$set": {
-                            "derived_status": recalculated_status,
-                            "status_source": "geofence",
-                        }
-                    },
-                )
+        if sharing_enabled is False:
+            item["derived_status"] = "Standortfreigabe aus"
+            out.append(item)
+            continue
 
-            item.update(
-                {
-                    "lat": lat,
-                    "lng": lng,
-                    "accuracy_m": loc.get("accuracy_m"),
-                    "source": loc.get("source"),
-                    "derived_status": recalculated_status,
-                    "updated_at": loc.get("created_at").isoformat() + "Z"
-                    if loc.get("created_at")
-                    else None,
-                }
+        if lat is None or lng is None:
+            item["derived_status"] = loc.get("derived_status") or "Kein Standort"
+            out.append(item)
+            continue
+
+        try:
+            lat_f = float(lat)
+            lng_f = float(lng)
+        except Exception:
+            item["derived_status"] = "Kein Standort"
+            out.append(item)
+            continue
+
+        if not _is_valid_coordinate(lat_f, lng_f):
+            item["derived_status"] = "Kein Standort"
+            out.append(item)
+            continue
+
+        if _is_stale_timestamp(updated_at):
+            item["derived_status"] = "Standort veraltet"
+            item["stale_location"] = True
+            out.append(item)
+            continue
+
+        try:
+            recalculated_status = await derive_status_from_places(
+                db,
+                fid,
+                lat_f,
+                lng_f,
+                accuracy_m=_normalize_accuracy(loc.get("accuracy_m")),
             )
+        except Exception:
+            recalculated_status = loc.get("derived_status") or "Unterwegs"
+
+        stored_status = loc.get("derived_status")
+        if recalculated_status != stored_status:
+            await db["locations"].update_one(
+                {"family_id": fid, "user_id": ObjectId(uid)},
+                {
+                    "$set": {
+                        "derived_status": recalculated_status,
+                        "status_source": "geofence",
+                    }
+                },
+            )
+
+        item.update(
+            {
+                "has_location": True,
+                "lat": lat_f,
+                "lng": lng_f,
+                "accuracy_m": _normalize_accuracy(loc.get("accuracy_m")),
+                "source": loc.get("source"),
+                "derived_status": recalculated_status,
+            }
+        )
 
         out.append(item)
 
     out.sort(key=lambda x: (x.get("display_name") or "").lower())
-    return {"family_id": family_id, "members": out}
+    return {
+        "family_id": family_id,
+        "members": out,
+        "location_stale_after_seconds": int(LOCATION_STALE_AFTER.total_seconds()),
+    }
 
 
 @router.get("/family/{family_id}/events")

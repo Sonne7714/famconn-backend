@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from math import asin, cos, radians, sin, sqrt
+from math import asin, cos, isfinite, radians, sin, sqrt
 from typing import Any
 
 from bson import ObjectId
@@ -445,6 +445,34 @@ async def delete_place(family_id: str, place_id: str, db=Depends(get_db), user=D
     return {"status": "deleted"}
 
 
+def _is_valid_coordinate(lat: float, lng: float) -> bool:
+    return (
+        isfinite(lat)
+        and isfinite(lng)
+        and -90.0 <= lat <= 90.0
+        and -180.0 <= lng <= 180.0
+    )
+
+
+def _safe_place_radius(value: Any) -> int:
+    try:
+        radius = int(value)
+    except Exception:
+        radius = 100
+    return max(50, min(radius, 5000))
+
+
+def _safe_place_coords(place: dict[str, Any]) -> tuple[float, float] | None:
+    try:
+        lat = float(place.get("lat"))
+        lng = float(place.get("lng"))
+    except Exception:
+        return None
+    if not _is_valid_coordinate(lat, lng):
+        return None
+    return lat, lng
+
+
 def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     r = 6371000.0
     dlat = radians(lat2 - lat1)
@@ -454,7 +482,17 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return r * c
 
 
-async def derive_status_from_places(db, family_id: ObjectId, lat: float, lng: float) -> str:
+async def derive_status_from_places(
+    db,
+    family_id: ObjectId,
+    lat: float,
+    lng: float,
+    *,
+    accuracy_m: float | None = None,
+) -> str:
+    if not _is_valid_coordinate(lat, lng):
+        return "Unterwegs"
+
     places = await db["family_places"].find(
         {"family_id": family_id},
         {"name": 1, "lat": 1, "lng": 1, "radius_m": 1},
@@ -462,12 +500,22 @@ async def derive_status_from_places(db, family_id: ObjectId, lat: float, lng: fl
 
     best_name = None
     best_dist = None
+
+    try:
+        accuracy_bonus = max(0.0, min(float(accuracy_m or 0), 150.0))
+    except Exception:
+        accuracy_bonus = 0.0
+
     for p in places:
-        plat = float(p.get("lat", 0))
-        plng = float(p.get("lng", 0))
-        radius = int(p.get("radius_m", 100))
+        coords = _safe_place_coords(p)
+        if not coords:
+            continue
+
+        plat, plng = coords
+        radius = _safe_place_radius(p.get("radius_m"))
+        effective_radius = radius + accuracy_bonus
         dist = _haversine_m(lat, lng, plat, plng)
-        if dist <= radius:
+        if dist <= effective_radius:
             if best_dist is None or dist < best_dist:
                 best_dist = dist
                 best_name = (p.get("name") or "").strip() or None

@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.db import close_mongo_connection, connect_to_mongo
 from app.routes import family
 from app.routes.auth import router as auth_router
+from app.routes.devtools import router as devtools_router
 from app.routes.location import router as location_router
 
 
@@ -61,3 +62,4 @@ async def health():
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(family.router)
 app.include_router(location_router)
+app.include_router(devtools_router)
